@@ -6,6 +6,8 @@ import 'reminder_screen.dart';
 import 'profile_screen.dart';
 import 'home_screen.dart';
 import 'progress_screen.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'symptom_assessment_screen.dart';
 
 class ScanResultScreen extends StatefulWidget {
@@ -13,8 +15,8 @@ class ScanResultScreen extends StatefulWidget {
   final String prediction;
   final double confidence;
   final String eye; // 'Left Eye' or 'Right Eye'
-  final String
-      scanDate; // Pass in formatted date string, e.g. '2025-06-17 18:11:01'
+  final String scanDate;
+  final String scanId;
 
   const ScanResultScreen({
     Key? key,
@@ -23,6 +25,7 @@ class ScanResultScreen extends StatefulWidget {
     required this.confidence,
     required this.eye,
     required this.scanDate,
+    required this.scanId,
   }) : super(key: key);
 
   @override
@@ -32,6 +35,28 @@ class ScanResultScreen extends StatefulWidget {
 class _ScanResultScreenState extends State<ScanResultScreen> {
   int _selectedNavIndex = 2;
   final String username = "tmae20";
+
+  Future<void> _addNotes(String notes) async {
+    try {
+      final userId = FirebaseAuth.instance.currentUser?.uid;
+      if (userId == null) return;
+
+      await FirebaseFirestore.instance
+          .collection('users')
+          .doc(userId)
+          .collection('scans')
+          .doc(widget.scanId)
+          .update({'notes': notes});
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Notes saved successfully')),
+      );
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error saving notes: $e')),
+      );
+    }
+  }
 
   void _onNavItemTapped(int index) {
     if (_selectedNavIndex == index && index == 2) {
