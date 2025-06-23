@@ -41,7 +41,38 @@ class _HomeScreenState extends State<HomeScreen> {
     super.initState();
     _updateDateTime();
     _fetchEyeHealthData();
-    // For Left Eye progress bar
+    _fetchRecentScans();
+  }
+
+  // Add this method to your class
+  Future<void> _fetchRecentScans() async {
+    try {
+      final userId = FirebaseAuth.instance.currentUser?.uid;
+      if (userId == null) {
+        return;
+      }
+
+      // Get scans from Firestore
+      final querySnapshot = await _firestore
+          .collection('users')
+          .doc(userId)
+          .collection('scans')
+          .orderBy('timestamp', descending: true)
+          .get();
+
+      // Convert to list of maps
+      final scans = querySnapshot.docs.map((doc) {
+        final data = doc.data();
+        data['id'] = doc.id; // Add document ID
+        return data;
+      }).toList();
+
+      setState(() {
+        _recentScans = scans;
+      });
+    } catch (e) {
+      print('Error fetching recent scans: $e');
+    }
   }
 
   Color _getStatusColor(String status, bool isLeftEye) {
@@ -218,9 +249,45 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   void _updateDateTime() {
-    // Fixed date as specified by user
-    _formattedDateTime = "2025-06-15 16:44:22";
-    _username = "ArsisjaySo";
+    // Get actual current date/time in UTC
+    final now = DateTime.now().toUtc();
+    final formatted =
+        "${now.year}-${_twoDigits(now.month)}-${_twoDigits(now.day)} "
+        "${_twoDigits(now.hour)}:${_twoDigits(now.minute)}:${_twoDigits(now.second)}";
+
+    setState(() {
+      _formattedDateTime = formatted;
+    });
+
+    // Try to get username from Firebase
+    _fetchUsername();
+  }
+
+  String _twoDigits(int n) {
+    return n.toString().padLeft(2, '0');
+  }
+
+  Future<void> _fetchUsername() async {
+    try {
+      final user = _auth.currentUser;
+      if (user != null) {
+        final userDoc =
+            await _firestore.collection('users').doc(user.uid).get();
+        if (userDoc.exists) {
+          final userData = userDoc.data();
+          if (userData != null) {
+            setState(() {
+              _username = userData['firstName'] ??
+                  userData['username'] ??
+                  user.email?.split('@')[0] ??
+                  "User";
+            });
+          }
+        }
+      }
+    } catch (e) {
+      print('Error fetching username: $e');
+    }
   }
 
   void _onNavItemTapped(int index) {
