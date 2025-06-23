@@ -1,3 +1,5 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'package:intl/intl.dart';
@@ -23,32 +25,194 @@ class _HomeScreenState extends State<HomeScreen> {
   int _selectedNavIndex = 0; // Default to Home tab (index 0)
   late String _formattedDateTime;
   late String _username;
-  final EyeScanService _eyeScanService = EyeScanService();
+  final FirebaseAuth _auth = FirebaseAuth.instance;
+  final FirebaseFirestore _firestore = FirebaseFirestore.instance;
   List<Map<String, dynamic>> _recentScans = [];
-  bool _isLoading = false;
+
+  Map<String, dynamic> _eyeHealthData = {
+    'leftEye': {'status': '', 'score': 0, 'stage': ''},
+    'rightEye': {'status': '', 'score': 0, 'stage': ''},
+    'overallScore': 0
+  };
+  bool _isLoadingMetrics = true;
 
   @override
   void initState() {
     super.initState();
     _updateDateTime();
-    _fetchRecentScans();
+    _fetchEyeHealthData();
+    // For Left Eye progress bar
   }
 
-  Future<void> _fetchRecentScans() async {
-    setState(() {
-      _isLoading = true;
+  Color _getStatusColor(String status, bool isLeftEye) {
+    if (status.toLowerCase() == 'normal') {
+      return Colors.green;
+    } else if (status.toLowerCase() == 'immature') {
+      return Colors.amber;
+    } else if (status.toLowerCase() == 'unknown') {
+      return Colors.grey;
+    } else {
+      // Default colors
+      return isLeftEye ? Colors.amber : Colors.green;
+    }
+  }
+
+  // Add this method to generate chart spots from scan history
+  List<FlSpot> _generateSpots(bool isRightEye) {
+    // Filter scans by eye
+    final filteredScans = _recentScans
+        .where((scan) => scan['eye'] == (isRightEye ? 'Right Eye' : 'Left Eye'))
+        .toList();
+
+    // Sort by timestamp
+    filteredScans.sort((a, b) {
+      final aTime = a['timestamp'] as Timestamp;
+      final bTime = b['timestamp'] as Timestamp;
+      return aTime.compareTo(bTime);
     });
 
+    // Limit to 6 most recent points
+    final limitedScans = filteredScans.length > 6
+        ? filteredScans.sublist(filteredScans.length - 6)
+        : filteredScans;
+
+    // Create spots
+    List<FlSpot> spots = [];
+    for (int i = 0; i < limitedScans.length; i++) {
+      final scan = limitedScans[i];
+      final confidence = (scan['confidence'] as double?) ?? 0.0;
+      spots.add(FlSpot(i.toDouble(), confidence * 100));
+    }
+
+    // If we have fewer than 6 points, fill with default values
+    if (spots.length < 6) {
+      // Default values to show a trend
+      final defaultValues = isRightEye
+          ? [90.0, 92.0, 94.0, 90.0, 93.0, 95.0]
+          : [55.0, 50.0, 45.0, 40.0, 38.0, 35.0];
+
+      for (int i = spots.length; i < 6; i++) {
+        spots.add(FlSpot(i.toDouble(), defaultValues[i]));
+      }
+    }
+
+    return spots;
+  }
+
+  Future<void> _fetchEyeHealthData() async {
     try {
-      final scans = await _eyeScanService.getScanHistory();
       setState(() {
-        _recentScans = scans;
-        _isLoading = false;
+        _isLoadingMetrics = true;
+      });
+
+      final userId = FirebaseAuth.instance.currentUser?.uid;
+      if (userId == null) {
+        setState(() {
+          _isLoadingMetrics = false;
+        });
+        return;
+      }
+
+      // Fetch the most recent left eye scan
+      final leftEyeQuery = await FirebaseFirestore.instance
+          .collection('users')
+          .doc(userId)
+          .collection('scans')
+          .where('eye', isEqualTo: 'Left Eye')
+          .orderBy('timestamp', descending: true)
+          .limit(1)
+          .get();
+
+      // Fetch the most recent right eye scan
+      final rightEyeQuery = await FirebaseFirestore.instance
+          .collection('users')
+          .doc(userId)
+          .collection('scans')
+          .where('eye', isEqualTo: 'Right Eye')
+          .orderBy('timestamp', descending: true)
+          .limit(1)
+          .get();
+
+      // Process left eye data
+      Map<String, dynamic> leftEyeData = {
+        'status': 'Unknown',
+        'score': 0,
+        'stage': 'No Data'
+      };
+
+      if (leftEyeQuery.docs.isNotEmpty) {
+        final doc = leftEyeQuery.docs.first;
+        final data = doc.data();
+
+        final prediction = data['prediction'] as String? ?? '';
+        final confidence = data['confidence'] as double? ?? 0.0;
+
+        final bool isNormal = prediction.toLowerCase().contains('normal') ||
+            prediction.toLowerCase() == "no cataract";
+
+        leftEyeData = {
+          'status': isNormal ? 'Normal' : 'Immature',
+          'score': (confidence * 100).round(),
+          'stage': isNormal ? 'No Cataract' : 'Initial Stage'
+        };
+      }
+
+      // Process right eye data
+      Map<String, dynamic> rightEyeData = {
+        'status': 'Unknown',
+        'score': 0,
+        'stage': 'No Data'
+      };
+
+      if (rightEyeQuery.docs.isNotEmpty) {
+        final doc = rightEyeQuery.docs.first;
+        final data = doc.data();
+
+        final prediction = data['prediction'] as String? ?? '';
+        final confidence = data['confidence'] as double? ?? 0.0;
+
+        final bool isNormal = prediction.toLowerCase().contains('normal') ||
+            prediction.toLowerCase() == "no cataract";
+
+        rightEyeData = {
+          'status': isNormal ? 'Normal' : 'Immature',
+          'score': (confidence * 100).round(),
+          'stage': isNormal ? 'No Cataract' : 'Initial Stage'
+        };
+      }
+
+      // Calculate overall score - Fix type issues here
+      int overallScore = 0;
+      if ((leftEyeData['score'] as num) > 0 ||
+          (rightEyeData['score'] as num) > 0) {
+        int divisor = 0;
+        int sum = 0;
+
+        if ((leftEyeData['score'] as num) > 0) {
+          sum += (leftEyeData['score'] as num).toInt();
+          divisor++;
+        }
+
+        if ((rightEyeData['score'] as num) > 0) {
+          sum += (rightEyeData['score'] as num).toInt();
+          divisor++;
+        }
+
+        overallScore = divisor > 0 ? (sum / divisor).round() : 0;
+      }
+
+      setState(() {
+        _eyeHealthData = {
+          'leftEye': leftEyeData,
+          'rightEye': rightEyeData,
+          'overallScore': overallScore
+        };
+        _isLoadingMetrics = false;
       });
     } catch (e) {
-      print('Error fetching scans: $e');
+      print('Error fetching eye health data: $e');
       setState(() {
-        _isLoading = false;
+        _isLoadingMetrics = false;
       });
     }
   }
@@ -297,63 +461,78 @@ class _HomeScreenState extends State<HomeScreen> {
                       ),
                     ],
                   ),
-                  child: Padding(
-                    padding: const EdgeInsets.all(20),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                          children: [
-                            // Health Status
-                            Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                const Text(
-                                  "Good Eye Health",
-                                  style: TextStyle(
-                                    fontSize: 22,
-                                    fontWeight: FontWeight.bold,
-                                    color: Colors.white,
+                  child: _isLoadingMetrics
+                      ? const Padding(
+                          padding: EdgeInsets.symmetric(vertical: 36),
+                          child: Center(
+                            child: CircularProgressIndicator(
+                              color: Colors.white,
+                              strokeWidth: 3,
+                            ),
+                          ),
+                        )
+                      : Padding(
+                          padding: const EdgeInsets.all(20),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(
+                                mainAxisAlignment:
+                                    MainAxisAlignment.spaceBetween,
+                                children: [
+                                  // Health Status
+                                  Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      Text(
+                                        _eyeHealthData['overallScore'] >= 70
+                                            ? "Good Eye Health"
+                                            : "Attention Needed",
+                                        style: const TextStyle(
+                                          fontSize: 22,
+                                          fontWeight: FontWeight.bold,
+                                          color: Colors.white,
+                                        ),
+                                      ),
+                                      const SizedBox(height: 6),
+                                      SizedBox(
+                                        width: size.width * 0.6,
+                                        child: Text(
+                                          "Your overall eye health score is based on the combined analysis of both eyes.",
+                                          style: TextStyle(
+                                            fontSize: 14,
+                                            color:
+                                                Colors.white.withOpacity(0.8),
+                                          ),
+                                        ),
+                                      ),
+                                    ],
                                   ),
-                                ),
-                                const SizedBox(height: 6),
-                                SizedBox(
-                                  width: size.width * 0.6,
-                                  child: Text(
-                                    "Your overall eye health score is based on the combined analysis of both eyes.",
-                                    style: TextStyle(
-                                      fontSize: 14,
-                                      color: Colors.white.withOpacity(0.8),
+                                  // Score Circle
+                                  Container(
+                                    width: 60,
+                                    height: 60,
+                                    decoration: const BoxDecoration(
+                                      color: Colors.white,
+                                      shape: BoxShape.circle,
+                                    ),
+                                    child: Center(
+                                      child: Text(
+                                        "${_eyeHealthData['overallScore']}%",
+                                        style: TextStyle(
+                                          fontSize: 18,
+                                          fontWeight: FontWeight.bold,
+                                          color: Colors.blue.shade800,
+                                        ),
+                                      ),
                                     ),
                                   ),
-                                ),
-                              ],
-                            ),
-                            // Score Circle
-                            Container(
-                              width: 60,
-                              height: 60,
-                              decoration: const BoxDecoration(
-                                color: Colors.white,
-                                shape: BoxShape.circle,
+                                ],
                               ),
-                              child: Center(
-                                child: Text(
-                                  "82%",
-                                  style: TextStyle(
-                                    fontSize: 18,
-                                    fontWeight: FontWeight.bold,
-                                    color: Colors.blue.shade800,
-                                  ),
-                                ),
-                              ),
-                            ),
-                          ],
+                            ],
+                          ),
                         ),
-                      ],
-                    ),
-                  ),
                 ),
               ),
 
@@ -390,79 +569,105 @@ class _HomeScreenState extends State<HomeScreen> {
                                 ),
                               ],
                             ),
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Row(
-                                  children: [
-                                    Container(
-                                      padding: const EdgeInsets.all(8),
-                                      decoration: BoxDecoration(
-                                        color: Colors.amber.withOpacity(0.1),
-                                        shape: BoxShape.circle,
-                                      ),
-                                      child: const Icon(
-                                        Icons.remove_red_eye,
-                                        color: Colors.amber,
-                                        size: 18,
-                                      ),
-                                    ),
-                                    const SizedBox(width: 8),
-                                    const Text(
-                                      "Left Eye",
-                                      style: TextStyle(
-                                        fontWeight: FontWeight.bold,
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                                const SizedBox(height: 16),
-                                Text(
-                                  "Immature",
-                                  style: TextStyle(
-                                    fontSize: 16,
-                                    fontWeight: FontWeight.bold,
-                                    color: Colors.amber.shade700,
-                                  ),
-                                ),
-                                const SizedBox(height: 4),
-                                Text(
-                                  "Initial Stage",
-                                  style: TextStyle(
-                                    fontSize: 14,
-                                    color: Colors.grey.shade600,
-                                  ),
-                                ),
-                                const SizedBox(height: 16),
-                                Container(
-                                  width: double.infinity,
-                                  height: 6,
-                                  decoration: BoxDecoration(
-                                    color: Colors.grey.shade200,
-                                    borderRadius: BorderRadius.circular(3),
-                                  ),
-                                  child: Row(
+                            child: _isLoadingMetrics
+                                ? Center(
+                                    child: CircularProgressIndicator(
+                                        color: Colors.amber))
+                                : Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
                                     children: [
+                                      Row(
+                                        children: [
+                                          Container(
+                                            padding: const EdgeInsets.all(8),
+                                            decoration: BoxDecoration(
+                                              color: _getStatusColor(
+                                                      _eyeHealthData['leftEye']
+                                                          ['status'],
+                                                      true)
+                                                  .withOpacity(0.1),
+                                              shape: BoxShape.circle,
+                                            ),
+                                            child: Icon(
+                                              Icons.remove_red_eye,
+                                              color: _getStatusColor(
+                                                  _eyeHealthData['leftEye']
+                                                      ['status'],
+                                                  true),
+                                              size: 18,
+                                            ),
+                                          ),
+                                          const SizedBox(width: 8),
+                                          const Text(
+                                            "Left Eye",
+                                            style: TextStyle(
+                                              fontWeight: FontWeight.bold,
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                      const SizedBox(height: 16),
+                                      Text(
+                                        _eyeHealthData['leftEye']['status'],
+                                        style: TextStyle(
+                                          fontSize: 16,
+                                          fontWeight: FontWeight.bold,
+                                          color: _getStatusColor(
+                                              _eyeHealthData['leftEye']
+                                                  ['status'],
+                                              true),
+                                        ),
+                                      ),
+                                      const SizedBox(height: 4),
+                                      Text(
+                                        _eyeHealthData['leftEye']['stage'],
+                                        style: TextStyle(
+                                          fontSize: 14,
+                                          color: Colors.grey.shade600,
+                                        ),
+                                      ),
+                                      const SizedBox(height: 16),
                                       Container(
-                                        width: 70,
+                                        width: double.infinity,
+                                        height: 6,
                                         decoration: BoxDecoration(
-                                          color: Colors.amber,
+                                          color: Colors.grey.shade200,
                                           borderRadius:
                                               BorderRadius.circular(3),
+                                        ),
+                                        child: Row(
+                                          children: [
+                                            Container(
+                                              width: ((MediaQuery.of(context)
+                                                              .size
+                                                              .width -
+                                                          72) /
+                                                      2) *
+                                                  (_eyeHealthData['leftEye']
+                                                          ['score'] /
+                                                      100),
+                                              decoration: BoxDecoration(
+                                                color: _getStatusColor(
+                                                    _eyeHealthData['leftEye']
+                                                        ['status'],
+                                                    true),
+                                                borderRadius:
+                                                    BorderRadius.circular(3),
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                      const SizedBox(height: 8),
+                                      Text(
+                                        "${_eyeHealthData['leftEye']['score']}%",
+                                        style: const TextStyle(
+                                          fontWeight: FontWeight.bold,
                                         ),
                                       ),
                                     ],
                                   ),
-                                ),
-                                const SizedBox(height: 8),
-                                const Text(
-                                  "35%",
-                                  style: TextStyle(
-                                    fontWeight: FontWeight.bold,
-                                  ),
-                                ),
-                              ],
-                            ),
                           ),
                         ),
                         const SizedBox(width: 16),
@@ -482,79 +687,105 @@ class _HomeScreenState extends State<HomeScreen> {
                                 ),
                               ],
                             ),
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Row(
-                                  children: [
-                                    Container(
-                                      padding: const EdgeInsets.all(8),
-                                      decoration: BoxDecoration(
-                                        color: Colors.green.withOpacity(0.1),
-                                        shape: BoxShape.circle,
-                                      ),
-                                      child: const Icon(
-                                        Icons.remove_red_eye,
-                                        color: Colors.green,
-                                        size: 18,
-                                      ),
-                                    ),
-                                    const SizedBox(width: 8),
-                                    const Text(
-                                      "Right Eye",
-                                      style: TextStyle(
-                                        fontWeight: FontWeight.bold,
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                                const SizedBox(height: 16),
-                                Text(
-                                  "Normal",
-                                  style: TextStyle(
-                                    fontSize: 16,
-                                    fontWeight: FontWeight.bold,
-                                    color: Colors.green.shade700,
-                                  ),
-                                ),
-                                const SizedBox(height: 4),
-                                Text(
-                                  "No Cataract",
-                                  style: TextStyle(
-                                    fontSize: 14,
-                                    color: Colors.grey.shade600,
-                                  ),
-                                ),
-                                const SizedBox(height: 16),
-                                Container(
-                                  width: double.infinity,
-                                  height: 6,
-                                  decoration: BoxDecoration(
-                                    color: Colors.grey.shade200,
-                                    borderRadius: BorderRadius.circular(3),
-                                  ),
-                                  child: Row(
+                            child: _isLoadingMetrics
+                                ? Center(
+                                    child: CircularProgressIndicator(
+                                        color: Colors.green))
+                                : Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
                                     children: [
+                                      Row(
+                                        children: [
+                                          Container(
+                                            padding: const EdgeInsets.all(8),
+                                            decoration: BoxDecoration(
+                                              color: _getStatusColor(
+                                                      _eyeHealthData['rightEye']
+                                                          ['status'],
+                                                      false)
+                                                  .withOpacity(0.1),
+                                              shape: BoxShape.circle,
+                                            ),
+                                            child: Icon(
+                                              Icons.remove_red_eye,
+                                              color: _getStatusColor(
+                                                  _eyeHealthData['rightEye']
+                                                      ['status'],
+                                                  false),
+                                              size: 18,
+                                            ),
+                                          ),
+                                          const SizedBox(width: 8),
+                                          const Text(
+                                            "Right Eye",
+                                            style: TextStyle(
+                                              fontWeight: FontWeight.bold,
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                      const SizedBox(height: 16),
+                                      Text(
+                                        _eyeHealthData['rightEye']['status'],
+                                        style: TextStyle(
+                                          fontSize: 16,
+                                          fontWeight: FontWeight.bold,
+                                          color: _getStatusColor(
+                                              _eyeHealthData['rightEye']
+                                                  ['status'],
+                                              false),
+                                        ),
+                                      ),
+                                      const SizedBox(height: 4),
+                                      Text(
+                                        _eyeHealthData['rightEye']['stage'],
+                                        style: TextStyle(
+                                          fontSize: 14,
+                                          color: Colors.grey.shade600,
+                                        ),
+                                      ),
+                                      const SizedBox(height: 16),
                                       Container(
-                                        width: 140,
+                                        width: double.infinity,
+                                        height: 6,
                                         decoration: BoxDecoration(
-                                          color: Colors.green,
+                                          color: Colors.grey.shade200,
                                           borderRadius:
                                               BorderRadius.circular(3),
+                                        ),
+                                        child: Row(
+                                          children: [
+                                            Container(
+                                              width: ((MediaQuery.of(context)
+                                                              .size
+                                                              .width -
+                                                          72) /
+                                                      2) *
+                                                  (_eyeHealthData['rightEye']
+                                                          ['score'] /
+                                                      100),
+                                              decoration: BoxDecoration(
+                                                color: _getStatusColor(
+                                                    _eyeHealthData['rightEye']
+                                                        ['status'],
+                                                    false),
+                                                borderRadius:
+                                                    BorderRadius.circular(3),
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                      const SizedBox(height: 8),
+                                      Text(
+                                        "${_eyeHealthData['rightEye']['score']}%",
+                                        style: const TextStyle(
+                                          fontWeight: FontWeight.bold,
                                         ),
                                       ),
                                     ],
                                   ),
-                                ),
-                                const SizedBox(height: 8),
-                                const Text(
-                                  "95%",
-                                  style: TextStyle(
-                                    fontWeight: FontWeight.bold,
-                                  ),
-                                ),
-                              ],
-                            ),
                           ),
                         ),
                       ],
@@ -697,43 +928,42 @@ class _HomeScreenState extends State<HomeScreen> {
                           lineBarsData: [
                             // Right Eye Line (Green)
                             LineChartBarData(
-                              spots: const [
-                                FlSpot(0, 90),
-                                FlSpot(1, 92),
-                                FlSpot(2, 94),
-                                FlSpot(3, 90),
-                                FlSpot(4, 93),
-                                FlSpot(5, 95),
-                              ],
+                              spots: _recentScans.isNotEmpty
+                                  ? _generateSpots(true)
+                                  : [
+                                      const FlSpot(0, 90),
+                                      const FlSpot(1, 92),
+                                      const FlSpot(2, 94),
+                                      const FlSpot(3, 90),
+                                      const FlSpot(4, 93),
+                                      const FlSpot(5, 95),
+                                    ],
                               isCurved: true,
                               color: Colors.green,
                               barWidth: 3,
                               isStrokeCapRound: true,
-                              dotData: const FlDotData(
-                                show: false,
-                              ),
+                              dotData: const FlDotData(show: false),
                               belowBarData: BarAreaData(
                                 show: true,
                                 color: Colors.green.withOpacity(0.1),
                               ),
                             ),
-                            // Left Eye Line (Amber)
                             LineChartBarData(
-                              spots: const [
-                                FlSpot(0, 55),
-                                FlSpot(1, 50),
-                                FlSpot(2, 45),
-                                FlSpot(3, 40),
-                                FlSpot(4, 38),
-                                FlSpot(5, 35),
-                              ],
+                              spots: _recentScans.isNotEmpty
+                                  ? _generateSpots(false)
+                                  : [
+                                      const FlSpot(0, 55),
+                                      const FlSpot(1, 50),
+                                      const FlSpot(2, 45),
+                                      const FlSpot(3, 40),
+                                      const FlSpot(4, 38),
+                                      const FlSpot(5, 35),
+                                    ],
                               isCurved: true,
                               color: Colors.amber,
                               barWidth: 3,
                               isStrokeCapRound: true,
-                              dotData: const FlDotData(
-                                show: false,
-                              ),
+                              dotData: const FlDotData(show: false),
                               belowBarData: BarAreaData(
                                 show: true,
                                 color: Colors.amber.withOpacity(0.1),
