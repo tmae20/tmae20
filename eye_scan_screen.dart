@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_application_1/eye_scan_service.dart';
 import 'dart:io';
 import 'package:image_picker/image_picker.dart';
 import 'package:camera/camera.dart';
@@ -18,6 +19,7 @@ class EyeScanScreen extends StatefulWidget {
 }
 
 class _EyeScanScreenState extends State<EyeScanScreen> {
+  final EyeScanService _eyeScanService = EyeScanService();
   final ImagePicker _picker = ImagePicker();
   File? _selectedImage;
   String _selectedEye = 'Left Eye';
@@ -112,33 +114,41 @@ class _EyeScanScreenState extends State<EyeScanScreen> {
     try {
       final XFile image = await _cameraController!.takePicture();
 
-      if (!mounted) return;
-
       File imageFile = File(image.path);
       final result = await CataractModel.predict(imageFile);
 
-      Navigator.push(
-        context,
-        MaterialPageRoute(
-          builder: (context) => ScanResultScreen(
-            imageFile: imageFile,
-            prediction: result['predictedClass'],
-            confidence: result['confidence'],
-            eye: _selectedEye,
-            scanDate: DateTime.now().toUtc().toString().split('.').first,
-          ),
-        ),
+      final scanId = await _eyeScanService.saveScanResult(
+        imageFile: imageFile,
+        prediction: result['predictedClass'],
+        confidence: result['confidence'],
+        eye: _selectedEye,
       );
 
+      if (mounted) {
+        Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (context) => ScanResultScreen(
+              imageFile: imageFile,
+              prediction: result['predictedClass'],
+              confidence: result['confidence'],
+              eye: _selectedEye,
+              scanDate: DateTime.now().toUtc().toString().split('.').first,
+              scanId: scanId,
+            ),
+          ),
+        );
+      }
+    } catch (e) {
+      print('Error capturing and saving image: $e');
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error: $e')),
+      );
+    } finally {
       setState(() {
         _isCameraActive = false;
         _isCapturing = false;
         _isCameraInitialized = false;
-      });
-    } on CameraException catch (e) {
-      print('Error capturing image: ${e.description}');
-      setState(() {
-        _isCapturing = false;
       });
     }
   }
@@ -151,6 +161,12 @@ class _EyeScanScreenState extends State<EyeScanScreen> {
       });
 
       final result = await CataractModel.predict(_selectedImage!);
+      final scanId = await _eyeScanService.saveScanResult(
+        imageFile: _selectedImage!,
+        prediction: result['predictedClass'],
+        confidence: result['confidence'],
+        eye: _selectedEye,
+      );
 
       Navigator.push(
         context,
@@ -161,6 +177,7 @@ class _EyeScanScreenState extends State<EyeScanScreen> {
             confidence: result['confidence'],
             eye: _selectedEye,
             scanDate: DateTime.now().toUtc().toString().split('.').first,
+            scanId: scanId,
           ),
         ),
       );
