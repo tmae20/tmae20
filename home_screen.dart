@@ -10,6 +10,7 @@ import 'profile_screen.dart';
 import 'activity_log_screen.dart';
 import 'view_history_screen.dart';
 import 'full_report_screen.dart';
+import '../eye_scan_service.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -22,11 +23,34 @@ class _HomeScreenState extends State<HomeScreen> {
   int _selectedNavIndex = 0; // Default to Home tab (index 0)
   late String _formattedDateTime;
   late String _username;
+  final EyeScanService _eyeScanService = EyeScanService();
+  List<Map<String, dynamic>> _recentScans = [];
+  bool _isLoading = false;
 
   @override
   void initState() {
     super.initState();
     _updateDateTime();
+    _fetchRecentScans();
+  }
+
+  Future<void> _fetchRecentScans() async {
+    setState(() {
+      _isLoading = true;
+    });
+
+    try {
+      final scans = await _eyeScanService.getScanHistory();
+      setState(() {
+        _recentScans = scans;
+        _isLoading = false;
+      });
+    } catch (e) {
+      print('Error fetching scans: $e');
+      setState(() {
+        _isLoading = false;
+      });
+    }
   }
 
   void _updateDateTime() {
